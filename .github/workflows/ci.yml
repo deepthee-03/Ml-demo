@@ -1,0 +1,143 @@
+# =============================================================================
+# .github/workflows/ci.yml
+# GitHub Actions — Iris Flower Classification CI Pipeline
+# =============================================================================
+#
+# Repository layout
+# -----------------
+#   ML_LAB/                     ← git repo root (where THIS file lives)
+#   ├── .github/workflows/ci.yml
+#   └── iris-flower-ci/         ← all Python source lives here
+#       ├── train.py
+#       ├── predict.py
+#       ├── test_model.py
+#       └── requirements.txt
+#
+# WHY defaults: run: working-directory?
+# --------------------------------------
+# GitHub Actions runs every `run:` step from the repo root by default.
+# Because all our source files live in the iris-flower-ci/ sub-folder,
+# every shell command would fail with "No such file or directory" without
+# an explicit directory override.
+#
+# Setting `defaults: run: working-directory` at the JOB level applies that
+# directory to EVERY `run:` step automatically — cleaner than adding
+# `cd iris-flower-ci &&` to each individual step.
+#
+# Trigger: push OR pull_request targeting the main branch
+# =============================================================================
+
+name: Iris Flower CI Pipeline
+
+# ── Triggers ──────────────────────────────────────────────────────────────────
+# Run the pipeline on every push to main AND on every pull request that
+# targets main (so bugs are caught before a PR is merged).
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+# ── Jobs ──────────────────────────────────────────────────────────────────────
+jobs:
+  build-and-test:
+
+    # GitHub-hosted Ubuntu runner — free, fast, and Linux-compatible.
+    runs-on: ubuntu-latest
+
+    # ------------------------------------------------------------------
+    # KEY FIX: default working directory for every `run:` step.
+    # Without this, every command runs from the repo root (ML_LAB/) and
+    # cannot find requirements.txt, train.py, or test_model.py.
+    # ------------------------------------------------------------------
+    defaults:
+      run:
+        working-directory: iris-flower-ci
+
+    steps:
+
+      # ── Step 1: Checkout ────────────────────────────────────────────────────
+      # Clones the full repository into the GitHub-hosted runner so all
+      # subsequent steps can access the source code.
+      # Note: `uses:` steps are NOT affected by `defaults: run:` — only
+      # `run:` steps are. Checkout always works from the repo root.
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── Step 2: Set up Python 3.10 ──────────────────────────────────────────
+      # Installs Python 3.10 and adds it to PATH.
+      #
+      # cache: 'pip' — IMPROVEMENT: tells setup-python to cache the pip
+      # download cache between runs. On a cache hit the install step skips
+      # downloading packages from PyPI and restores them from the Actions
+      # cache instead. This can cut 30-60 s off each run.
+      #
+      # cache-dependency-path — points to requirements.txt relative to the
+      # REPO ROOT (not the working-directory) so Actions can fingerprint the
+      # cache key correctly. A change in requirements.txt automatically
+      # invalidates the cache and forces a fresh install.
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: "pip"
+          cache-dependency-path: iris-flower-ci/requirements.txt
+
+      # ── Step 3: Confirm Python version ──────────────────────────────────────
+      # IMPROVEMENT: printing the exact Python and pip versions that the runner
+      # is using makes debugging version-related failures much faster.
+      # This step runs inside iris-flower-ci/ (per defaults) — that is fine
+      # because `python --version` does not depend on the directory.
+      - name: Display Python version
+        run: |
+          python --version
+          pip --version
+
+      # ── Step 4: Upgrade pip ─────────────────────────────────────────────────
+      # GitHub-hosted runners ship with an older pip. Upgrading ensures we get
+      # the latest dependency resolver and avoids known resolver bugs in older
+      # versions.
+      - name: Upgrade pip
+        run: python -m pip install --upgrade pip
+
+      # ── Step 5: Install dependencies ────────────────────────────────────────
+      # Reads iris-flower-ci/requirements.txt (the default working-directory
+      # makes `requirements.txt` resolve to that subfolder automatically).
+      # --no-cache-dir is intentionally omitted so that pip's own layer cache
+      # and the Actions pip cache work together for maximum speed.
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # ── Step 6: Train the model ─────────────────────────────────────────────
+      # Executes train.py inside iris-flower-ci/ (default working-directory).
+      # This script loads the Iris dataset, trains a Logistic Regression model,
+      # evaluates it, and writes iris_model.pkl to iris-flower-ci/.
+      # The pytest tests REQUIRE this file to exist before they run.
+      - name: Train the Iris model
+        run: python train.py
+
+      # ── Step 7: Run pytest ──────────────────────────────────────────────────
+      # Runs test_model.py inside iris-flower-ci/ (default working-directory).
+      # Flags:
+      #   -v  verbose — shows each test name with PASSED / FAILED
+      #   -s  no capture — allows print() inside tests to appear in the log
+      - name: Run unit tests
+        run: python -m pytest test_model.py -v -s
+
+      # ── Step 8: Pipeline result summary ─────────────────────────────────────
+      # `if: always()` ensures this step runs even when earlier steps fail,
+      # giving a clear human-readable pass/fail banner at the bottom of the log.
+      - name: Pipeline result
+        if: always()
+        run: |
+          if [ "${{ job.status }}" = "success" ]; then
+            echo "============================================"
+            echo "  CI PIPELINE PASSED — all tests green!"
+            echo "============================================"
+          else
+            echo "============================================"
+            echo "  CI PIPELINE FAILED — check logs above."
+            echo "============================================"
+          fi
