@@ -1,0 +1,81 @@
+# =============================================================================
+# ci.yml — GitHub Actions Continuous Integration workflow
+# =============================================================================
+# This workflow automatically:
+#   1. Checks out the repository code
+#   2. Sets up Python 3.11
+#   3. Installs all required dependencies
+#   4. Trains the Iris classification model (produces iris_model.pkl)
+#   5. Runs the full pytest test suite
+#   6. Reports whether the pipeline passed or failed
+#
+# Trigger: every push OR pull request targeting the 'main' branch
+# =============================================================================
+
+name: Iris Flower CI Pipeline
+
+# ── When to run this workflow ─────────────────────────────────────────────────
+on:
+  push:
+    branches:
+      - main          # Run on every commit pushed to main
+  pull_request:
+    branches:
+      - main          # Run on every PR that targets main
+
+# ── Jobs ─────────────────────────────────────────────────────────────────────
+jobs:
+  build-and-test:
+    # Use the latest stable Ubuntu runner provided by GitHub
+    runs-on: ubuntu-latest
+
+    steps:
+      # ── Step 1: Check out the repository ───────────────────────────────────
+      # Downloads the full source code of the repository into the runner
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── Step 2: Set up Python 3.11 ─────────────────────────────────────────
+      # Installs the specified Python version and adds it to PATH
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # ── Step 3: Upgrade pip ────────────────────────────────────────────────
+      # Always upgrade pip to the latest version to avoid resolver issues
+      - name: Upgrade pip
+        run: python -m pip install --upgrade pip
+
+      # ── Step 4: Install project dependencies ──────────────────────────────
+      # Reads requirements.txt and installs every listed library
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # ── Step 5: Train the model ────────────────────────────────────────────
+      # Runs train.py which creates iris_model.pkl in the working directory.
+      # The pytest tests depend on this file existing before they run.
+      - name: Train the Iris model
+        run: python train.py
+
+      # ── Step 6: Run pytest ─────────────────────────────────────────────────
+      # -v  → verbose output (shows each test name and pass/fail)
+      # -s  → allow print() statements inside tests to appear in the log
+      - name: Run unit tests
+        run: pytest test_model.py -v -s
+
+      # ── Step 7: Pipeline result summary ───────────────────────────────────
+      # This step always runs (even if earlier steps fail) and prints a clear
+      # pass/fail message so the result is obvious at a glance in the Actions UI.
+      - name: Pipeline result
+        if: always()
+        run: |
+          if [ "${{ job.status }}" = "success" ]; then
+            echo "============================================"
+            echo "  CI PIPELINE PASSED — all tests green!"
+            echo "============================================"
+          else
+            echo "============================================"
+            echo "  CI PIPELINE FAILED — check logs above."
+            echo "============================================"
+          fi
