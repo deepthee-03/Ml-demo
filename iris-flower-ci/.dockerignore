@@ -1,0 +1,75 @@
+# =============================================================================
+# .dockerignore — Exclude files from the Docker build context
+# =============================================================================
+# Docker sends the entire build context (the folder passed to `docker build`)
+# to the Docker daemon before processing the Dockerfile. A .dockerignore file
+# works exactly like .gitignore: it tells Docker which paths to exclude from
+# that transfer, making builds faster and keeping images lean.
+#
+# Rule of thumb: exclude everything that is NOT referenced in a COPY instruction
+# inside the Dockerfile.
+# =============================================================================
+
+# ── Python runtime artifacts ──────────────────────────────────────────────────
+# .pyc files are compiled bytecode — platform-specific and auto-regenerated.
+# __pycache__ directories hold these files per-module.
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# ── Test cache ────────────────────────────────────────────────────────────────
+# pytest creates .pytest_cache/ to speed up re-runs. Not needed in the image.
+.pytest_cache/
+
+# ── Source control ────────────────────────────────────────────────────────────
+# The .git directory can be hundreds of megabytes and has zero runtime value
+# inside a container. Always exclude it.
+.git/
+.gitignore
+
+# ── CI/CD configuration ───────────────────────────────────────────────────────
+# GitHub Actions and Jenkins configs are pipeline tools — not application code.
+.github/
+Jenkinsfile
+
+# ── Virtual environments ──────────────────────────────────────────────────────
+# The container uses system Python + pip, not a local venv.
+# Including a venv/ would bloat the image and cause path conflicts.
+venv/
+.venv/
+env/
+.env/
+
+# ── IDE and editor files ──────────────────────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# ── Test files ────────────────────────────────────────────────────────────────
+# Tests run in Jenkins before Docker build. The production container only
+# needs train.py and predict.py.
+test_model.py
+reports/
+
+# ── Pre-trained model ─────────────────────────────────────────────────────────
+# The container trains a fresh model on startup via entrypoint.sh → train.py.
+# Including a stale .pkl from the host would make the container non-reproducible.
+iris_model.pkl
+
+# ── Documentation ─────────────────────────────────────────────────────────────
+README.md
+*.md
+
+# ── Build artifacts ───────────────────────────────────────────────────────────
+dist/
+build/
+*.egg-info/
+
+# ── Temporary files ───────────────────────────────────────────────────────────
+*.log
+*.tmp
+*.bak

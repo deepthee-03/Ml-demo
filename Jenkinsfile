@@ -1,39 +1,67 @@
 // =============================================================================
 // Jenkinsfile — Declarative Pipeline for Iris Flower ML Project
 // =============================================================================
-// Repo layout assumed:
-//   ML_LAB/                        ← repo root (this file lives here)
+// Repo layout:
+//   ML_LAB/                        ← git repo root (this file lives here)
 //   ├── Jenkinsfile
 //   └── iris-flower-ci/
 //       ├── train.py
 //       ├── predict.py
 //       ├── test_model.py
-//       └── requirements.txt
+//       ├── requirements.txt
+//       ├── Dockerfile
+//       ├── entrypoint.sh
+//       └── .dockerignore
+//
+// Pipeline stages:
+//   1  Checkout              — clone repo onto the agent
+//   2  Setup Virtual Env     — create isolated Python venv
+//   3  Install Dependencies  — pip install requirements + flake8
+//   4  Code Quality Check    — flake8 lint report
+//   5  Run Unit Tests        — pytest with JUnit XML report
+//   6  Train ML Model        — python train.py (produces iris_model.pkl)
+//   7  Verify Model Artifact — confirm iris_model.pkl exists
+//   8  Archive Artifacts     — store model + reports in Jenkins
+//   9  Build Docker Image    — docker build from iris-flower-ci/
+//   10 Deploy Container      — remove old container, start new one
+//   11 Container Logs        — print container output to Jenkins log
 // =============================================================================
 
 pipeline {
 
     // ── Agent ─────────────────────────────────────────────────────────────────
-    // 'any' lets Jenkins pick any available node.
-    // Replace with agent { label 'linux' } or agent { label 'windows' }
-    // to pin to a specific node type.
     agent any
 
     // ── Global environment variables ──────────────────────────────────────────
     environment {
-        PROJECT_DIR  = 'iris-flower-ci'               // subfolder with all source
-        VENV_DIR     = "${WORKSPACE}\\${PROJECT_DIR}\\venv"  // virtualenv root
-        MODEL_FILE   = 'iris_model.pkl'               // artifact produced by train.py
-        REPORTS_DIR  = "${WORKSPACE}\\${PROJECT_DIR}\\reports" // test/lint reports
-        MIN_ACCURACY = '0.90'                         // documented threshold (informational)
+        PROJECT_DIR    = 'iris-flower-ci'
+        VENV_DIR       = "${WORKSPACE}\\${PROJECT_DIR}\\venv"
+        MODEL_FILE     = 'iris_model.pkl'
+        REPORTS_DIR    = "${WORKSPACE}\\${PROJECT_DIR}\\reports"
+        MIN_ACCURACY   = '0.90'
+
+        // Docker-specific variables
+        // IMAGE_NAME  : name:tag used for the Docker image.
+        //   BUILD_NUMBER is Jenkins' auto-incrementing build counter — using it
+        //   as the tag means every build produces a uniquely tagged image,
+        //   enabling rollback to any previous build.
+        IMAGE_NAME     = "iris-flower:${BUILD_NUMBER}"
+
+        // IMAGE_LATEST : a floating 'latest' tag always pointing to the newest build.
+        //   Useful for pulling the current image without knowing the build number.
+        IMAGE_LATEST   = 'iris-flower:latest'
+
+        // CONTAINER_NAME : fixed name for the running container.
+        //   Using a fixed name makes stop/remove/log commands predictable.
+        CONTAINER_NAME = 'iris-flower-container'
     }
 
     // ── Pipeline-wide options ─────────────────────────────────────────────────
     options {
-        timestamps()                              // prefix every log line with a timestamp
-        timeout(time: 30, unit: 'MINUTES')        // abort runaway builds after 30 min
-        buildDiscarder(logRotator(numToKeepStr: '10'))  // keep only the last 10 builds
-        disableConcurrentBuilds()                 // prevent overlapping runs on the same branch
+        timestamps()
+        timeout(time: 30, unit: 'MINUTES')
+        buildDiscarder(logRotator(numToKeepStr: '10'))
+        disableConcurrentBuilds()
     }
 
     // =========================================================================
@@ -42,9 +70,6 @@ pipeline {
     stages {
 
         // ── Stage 1: Checkout ─────────────────────────────────────────────────
-        // Clones/updates the repository on the Jenkins agent.
-        // `checkout scm` uses the SCM configuration from the Jenkins job itself,
-        // so no hardcoded URL is needed — the job stays portable.
         stage('Checkout') {
             steps {
                 echo '─────────────────────────────────────────'
@@ -58,9 +83,6 @@ pipeline {
         }
 
         // ── Stage 2: Setup Virtual Environment ────────────────────────────────
-        // Creates an isolated Python virtualenv so dependencies never bleed
-        // into the system Python or other Jenkins jobs.
-        // Supports both Windows (bat) and Unix (sh) agents via isUnix().
         stage('Setup Virtual Environment') {
             steps {
                 echo '─────────────────────────────────────────'
@@ -87,9 +109,6 @@ pipeline {
         }
 
         // ── Stage 3: Install Dependencies ─────────────────────────────────────
-        // Upgrades pip first (avoids resolver bugs in older pip versions),
-        // then installs all packages listed in requirements.txt.
-        // flake8 is added here for the code-quality stage that follows.
         stage('Install Dependencies') {
             steps {
                 echo '─────────────────────────────────────────'
@@ -122,11 +141,6 @@ pipeline {
         }
 
         // ── Stage 4: Code Quality — flake8 ────────────────────────────────────
-        // Runs flake8 on all Python files in the project directory.
-        // --max-line-length=120  — relaxed limit suitable for ML scripts
-        // --statistics           — prints a count of each error code found
-        // --exit-zero            — report issues but do NOT fail the build;
-        //                          remove this flag to make quality a hard gate.
         stage('Code Quality Check') {
             steps {
                 echo '─────────────────────────────────────────'
@@ -157,10 +171,6 @@ pipeline {
         }
 
         // ── Stage 5: Unit Tests — pytest ──────────────────────────────────────
-        // Runs all tests in test_model.py.
-        // --junitxml writes a JUnit-format XML report so Jenkins can parse it,
-        // display a test trend graph, and mark individual test cases as
-        // passed/failed/skipped in the UI.
         stage('Run Unit Tests') {
             steps {
                 echo '─────────────────────────────────────────'
@@ -189,8 +199,6 @@ pipeline {
                 }
             }
             post {
-                // Publish JUnit results regardless of pass/fail so Jenkins
-                // always shows the test trend graph on the job page.
                 always {
                     junit "${PROJECT_DIR}/reports/test-results.xml"
                 }
@@ -198,11 +206,6 @@ pipeline {
         }
 
         // ── Stage 6: Train ML Model ───────────────────────────────────────────
-        // Runs train.py which:
-        //   1. Loads the Iris dataset
-        //   2. Trains a Logistic Regression classifier
-        //   3. Evaluates and prints metrics
-        //   4. Writes iris_model.pkl to the project directory
         stage('Train ML Model') {
             steps {
                 echo '─────────────────────────────────────────'
@@ -227,9 +230,6 @@ pipeline {
         }
 
         // ── Stage 7: Verify Model Artifact ────────────────────────────────────
-        // Confirms that iris_model.pkl was actually written by train.py.
-        // A missing model file here means training silently failed — catching
-        // this early prevents a confusing "file not found" error downstream.
         stage('Verify Model Artifact') {
             steps {
                 echo '─────────────────────────────────────────'
@@ -261,10 +261,6 @@ pipeline {
         }
 
         // ── Stage 8: Archive Artifacts ────────────────────────────────────────
-        // Stores the trained model and test reports in Jenkins so they can be
-        // downloaded from the build page at any time.
-        // fingerprint: true  — Jenkins computes an MD5 hash of each artifact,
-        //                       enabling traceability across builds and jobs.
         stage('Archive Artifacts') {
             steps {
                 echo '─────────────────────────────────────────'
@@ -278,51 +274,164 @@ pipeline {
                 echo "Artifacts archived: ${MODEL_FILE} + test reports"
             }
         }
+
+        // ── Stage 9: Build Docker Image ───────────────────────────────────────
+        // Runs AFTER all tests pass so we only build an image from verified code.
+        //
+        // `docker build` flags used:
+        //   -t ${IMAGE_NAME}   : tag as iris-flower:<BUILD_NUMBER> for traceability
+        //   -t ${IMAGE_LATEST} : also tag as iris-flower:latest (floating pointer)
+        //   --pull             : always pull the latest base image (python:3.10-slim)
+        //                        to pick up OS security patches automatically
+        //   ./iris-flower-ci   : build context — the folder containing the Dockerfile
+        //                        (relative to WORKSPACE, which is the repo root)
+        stage('Build Docker Image') {
+            steps {
+                echo '─────────────────────────────────────────'
+                echo " STAGE 9 — Build Docker image: ${IMAGE_NAME}"
+                echo '─────────────────────────────────────────'
+                script {
+                    if (isUnix()) {
+                        sh """
+                            echo 'Building Docker image...'
+                            docker build \
+                                --pull \
+                                -t ${IMAGE_NAME} \
+                                -t ${IMAGE_LATEST} \
+                                ./${PROJECT_DIR}
+                            echo 'Image built successfully.'
+                            docker images | grep iris-flower
+                        """
+                    } else {
+                        bat """
+                            echo Building Docker image...
+                            docker build ^
+                                --pull ^
+                                -t ${IMAGE_NAME} ^
+                                -t ${IMAGE_LATEST} ^
+                                .\\${PROJECT_DIR}
+                            echo Image built successfully.
+                            docker images | findstr iris-flower
+                        """
+                    }
+                }
+            }
+        }
+
+        // ── Stage 10: Deploy Container ────────────────────────────────────────
+        // Removes any existing container with the same name (avoids "name
+        // already in use" errors on re-runs), then starts a fresh container.
+        //
+        // `docker rm -f ... || true`
+        //   The `|| true` (Unix) / `|| exit 0` (Windows) pattern means:
+        //   "if the container doesn't exist yet, that's fine — keep going."
+        //   Without it, Jenkins would fail the stage on the very first build
+        //   because there is no old container to remove.
+        //
+        // `docker run` flags:
+        //   --name ${CONTAINER_NAME}  : gives the container a fixed, predictable name
+        //   --rm                      : auto-delete the container when it exits
+        //                               (we archive the model in Stage 8 already)
+        //   ${IMAGE_LATEST}           : always run the image we just built
+        stage('Deploy Container') {
+            steps {
+                echo '─────────────────────────────────────────'
+                echo ' STAGE 10 — Remove old container and start new one'
+                echo '─────────────────────────────────────────'
+                script {
+                    if (isUnix()) {
+                        sh """
+                            echo 'Removing old container if it exists...'
+                            docker rm -f ${CONTAINER_NAME} || true
+
+                            echo 'Starting new container...'
+                            docker run \
+                                --name ${CONTAINER_NAME} \
+                                ${IMAGE_LATEST}
+
+                            echo 'Container finished executing.'
+                        """
+                    } else {
+                        bat """
+                            echo Removing old container if it exists...
+                            docker rm -f ${CONTAINER_NAME} || exit 0
+
+                            echo Starting new container...
+                            docker run ^
+                                --name ${CONTAINER_NAME} ^
+                                ${IMAGE_LATEST}
+
+                            echo Container finished executing.
+                        """
+                    }
+                }
+            }
+        }
+
+        // ── Stage 11: Container Logs ──────────────────────────────────────────
+        // Prints the full stdout/stderr from the completed container into the
+        // Jenkins build log. This makes the training results and predictions
+        // visible directly in the Jenkins UI without needing to ssh into a host.
+        //
+        // Note: `docker logs` works on exited containers too — the container
+        // does not need to still be running.
+        stage('Container Logs') {
+            steps {
+                echo '─────────────────────────────────────────'
+                echo ' STAGE 11 — Print container logs'
+                echo '─────────────────────────────────────────'
+                script {
+                    if (isUnix()) {
+                        sh "docker logs ${CONTAINER_NAME}"
+                    } else {
+                        bat "docker logs ${CONTAINER_NAME}"
+                    }
+                }
+            }
+        }
     }
 
     // =========================================================================
-    // POST ACTIONS — run after all stages regardless of outcome
+    // POST ACTIONS
     // =========================================================================
     post {
 
-        // Runs only when every stage above passed.
         success {
             echo '============================================'
-            echo '  PIPELINE PASSED — model trained & tested!'
+            echo '  PIPELINE PASSED — image built and run!'
             echo '============================================'
-            // Uncomment and configure to send an email on success:
             // mail to: 'team@example.com',
             //      subject: "SUCCESS: ${JOB_NAME} #${BUILD_NUMBER}",
-            //      body: "All stages passed.\nSee: ${BUILD_URL}"
+            //      body: "All stages passed. Docker image: ${IMAGE_NAME}\nSee: ${BUILD_URL}"
         }
 
-        // Runs only when at least one stage failed.
         failure {
             echo '============================================'
             echo '  PIPELINE FAILED — check the logs above.'
             echo '============================================'
-            // Uncomment and configure to send an email on failure:
             // mail to: 'team@example.com',
             //      subject: "FAILURE: ${JOB_NAME} #${BUILD_NUMBER}",
-            //      body: "The pipeline failed at stage: ${FAILED_STAGE}\nSee: ${BUILD_URL}"
+            //      body: "Pipeline failed.\nSee: ${BUILD_URL}"
         }
 
-        // Runs when the build status changed from the previous build
-        // (e.g., fixed after failure, or newly broken).
         changed {
             echo "Build status changed — was: ${currentBuild.previousBuild?.result}"
         }
 
-        // Runs on every build, regardless of outcome. Use for cleanup.
         always {
             echo "Build result : ${currentBuild.currentResult}"
             echo "Duration     : ${currentBuild.durationString}"
-            // Clean up the virtualenv to reclaim disk space on the agent.
-            // Remove the comment below to enable cleanup after every run:
-            // script {
-            //     if (isUnix()) { sh "rm -rf ${PROJECT_DIR}/venv" }
-            //     else { bat "rd /s /q ${PROJECT_DIR}\\venv" }
-            // }
+
+            // Clean up dangling/untagged Docker images to prevent disk exhaustion.
+            // `|| true` prevents this housekeeping step from failing the build
+            // if there are no dangling images to prune.
+            script {
+                if (isUnix()) {
+                    sh "docker image prune -f || true"
+                } else {
+                    bat "docker image prune -f || exit 0"
+                }
+            }
         }
     }
 }
